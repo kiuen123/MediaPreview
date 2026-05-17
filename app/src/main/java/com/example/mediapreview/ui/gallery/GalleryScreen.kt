@@ -55,9 +55,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import android.content.res.Configuration
 import coil3.compose.AsyncImage
 import com.example.mediapreview.data.GalleryItem
+import com.example.mediapreview.ui.music.MusicScreen
+import com.example.mediapreview.ui.music.MusicViewModel
 import kotlinx.coroutines.flow.collectLatest
+import androidx.compose.ui.platform.LocalConfiguration
 
 // ── Screen ─────────────────────────────────────────────────────────────────
 
@@ -65,10 +69,14 @@ import kotlinx.coroutines.flow.collectLatest
 @Composable
 fun GalleryScreen(
     viewModel: GalleryViewModel,
+    musicViewModel: MusicViewModel,
     onItemClick: (GalleryItem) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val useNavigationRail = isLandscape
     var permissionGranted by remember { mutableStateOf(false) }
     var showModeMenu by remember { mutableStateOf(false) }
     var searchActive by remember { mutableStateOf(false) }
@@ -154,6 +162,7 @@ fun GalleryScreen(
             arrayOf(
                 Manifest.permission.READ_MEDIA_IMAGES,
                 Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_AUDIO,
             )
         )
     }
@@ -318,29 +327,55 @@ fun GalleryScreen(
                     onFavorite = { viewModel.addSelectedToFavorites() },
                     onDelete = { viewModel.requestDeleteSelected() }
                 )
-                !searchActive && state.navigationTab == NavigationTab.PHOTOS && !inFolder -> {
-                    val selectedTabIndex = if (state.displayMode == DisplayMode.FOLDER) 3
-                    else when (state.mediaFilter) {
-                        MediaTypeFilter.ALL    -> 0
-                        MediaTypeFilter.IMAGES -> 1
-                        MediaTypeFilter.VIDEOS -> 2
+                !searchActive && !inFolder && !useNavigationRail -> GlobalNavigationBar(
+                    currentTab = state.navigationTab,
+                    onTabSelected = { tab ->
+                        viewModel.setNavigationTab(tab)
+                        if (tab == NavigationTab.MUSIC) musicViewModel.loadMusic()
                     }
-                    MediaTypeBottomBar(
-                        selectedIndex = selectedTabIndex,
-                        onAll    = { viewModel.setMediaFilterFromTab(MediaTypeFilter.ALL) },
-                        onImages = { viewModel.setMediaFilterFromTab(MediaTypeFilter.IMAGES) },
-                        onVideos = { viewModel.setMediaFilterFromTab(MediaTypeFilter.VIDEOS) },
-                        onFolder = { viewModel.setDisplayMode(DisplayMode.FOLDER) }
-                    )
-                }
+                )
             }
         }
     ) { paddingValues ->
-        Column(
+        Row(
             modifier = Modifier
                 .padding(paddingValues)
                 .fillMaxSize()
         ) {
+            // Navigation Rail for landscape / tablet
+            if (useNavigationRail && !state.selectionMode && !searchActive && !inFolder) {
+                GlobalNavigationRail(
+                    currentTab = state.navigationTab,
+                    onTabSelected = { tab ->
+                        viewModel.setNavigationTab(tab)
+                        if (tab == NavigationTab.MUSIC) musicViewModel.loadMusic()
+                    }
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+            ) {
+
+            // ── Media-type filter tabs (only in PHOTOS tab, not inside a folder) ──
+            if (!searchActive && !state.selectionMode
+                && state.navigationTab == NavigationTab.PHOTOS && !inFolder
+            ) {
+                val selectedTabIndex = when (state.mediaFilter) {
+                    MediaTypeFilter.ALL    -> 0
+                    MediaTypeFilter.IMAGES -> 1
+                    MediaTypeFilter.VIDEOS -> 2
+                }
+                MediaTypeFilterRow(
+                    selectedIndex = selectedTabIndex,
+                    onAll    = { viewModel.setMediaFilterFromTab(MediaTypeFilter.ALL) },
+                    onImages = { viewModel.setMediaFilterFromTab(MediaTypeFilter.IMAGES) },
+                    onVideos = { viewModel.setMediaFilterFromTab(MediaTypeFilter.VIDEOS) }
+                )
+                HorizontalDivider(thickness = 1.dp)
+            }
 
             // ── Content ──────────────────────────────────────────────────────
             AnimatedContent(
@@ -351,97 +386,102 @@ fun GalleryScreen(
                             (slideOutHorizontally { if (direction > 0) -it / 3 else it / 3 } + fadeOut(targetAlpha = 0.5f))
                 },
                 label = "tab_content"
-            ) { _ ->
-                when {
-                    state.isLoading -> {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator()
+            ) { tab ->
+                when (tab) {
+                    NavigationTab.MUSIC -> MusicScreen(viewModel = musicViewModel)
+                    else -> when {
+                        state.isLoading -> {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator()
+                            }
                         }
-                    }
-                    !permissionGranted && state.rawAllMedia.isEmpty() && !state.isLoading -> {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(Icons.Default.LockOpen, null,
-                                    modifier = Modifier.size(64.dp),
-                                    tint = MaterialTheme.colorScheme.primary)
-                                Spacer(Modifier.height(16.dp))
+                        !permissionGranted && state.rawAllMedia.isEmpty() && !state.isLoading -> {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(Icons.Default.LockOpen, null,
+                                        modifier = Modifier.size(64.dp),
+                                        tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(Modifier.height(16.dp))
+                                    Text(
+                                        text = "Cần cấp quyền truy cập bộ nhớ\nđể xem ảnh và video.",
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.padding(16.dp)
+                                    )
+                                    Button(onClick = {
+                                        permissionLauncher.launch(
+                                            arrayOf(
+                                                Manifest.permission.READ_MEDIA_IMAGES,
+                                                Manifest.permission.READ_MEDIA_VIDEO,
+                                                Manifest.permission.READ_MEDIA_AUDIO,
+                                            )
+                                        )
+                                    }) { Text("Cấp quyền") }
+                                }
+                            }
+                        }
+                        state.error != null -> {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text(
-                                    text = "Cần cấp quyền truy cập bộ nhớ\nđể xem ảnh và video.",
+                                    text = "Lỗi tải media:\n${state.error}",
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier.padding(16.dp)
                                 )
-                                Button(onClick = {
-                                    permissionLauncher.launch(
-                                        arrayOf(
-                                            Manifest.permission.READ_MEDIA_IMAGES,
-                                            Manifest.permission.READ_MEDIA_VIDEO,
-                                        )
-                                    )
-                                }) { Text("Cấp quyền") }
                             }
                         }
-                    }
-                    state.error != null -> {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text(
-                                text = "Lỗi tải media:\n${state.error}",
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(16.dp)
+                        state.displayItems.isEmpty() -> {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(
+                                        imageVector = when (state.navigationTab) {
+                                            NavigationTab.FAVORITES -> Icons.Default.FavoriteBorder
+                                            NavigationTab.ALBUMS -> Icons.Default.PhotoAlbum
+                                            else -> Icons.Default.PhotoLibrary
+                                        },
+                                        contentDescription = null,
+                                        modifier = Modifier.size(64.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    )
+                                    Spacer(Modifier.height(16.dp))
+                                    Text(
+                                        text = when (state.navigationTab) {
+                                            NavigationTab.FAVORITES -> "Chưa có ảnh yêu thích"
+                                            else -> if (state.searchQuery.isNotBlank()) "Không tìm thấy kết quả"
+                                            else "Không tìm thấy ảnh hoặc video nào."
+                                        },
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                        else -> {
+                            val isFolderList = (state.navigationTab == NavigationTab.ALBUMS ||
+                                    state.displayMode == DisplayMode.FOLDER) && state.selectedFolder == null
+                            MediaGrid(
+                                items = state.displayItems,
+                                isFolderList = isFolderList,
+                                selectionMode = state.selectionMode,
+                                selectedIds = state.selectedIds,
+                                favoriteIds = state.favoriteIds,
+                                onItemClick = { item ->
+                                    if (state.selectionMode) {
+                                        viewModel.toggleItemSelection(item.id)
+                                    } else {
+                                        onItemClick(item)
+                                    }
+                                },
+                                onItemLongClick = { item ->
+                                    if (!state.selectionMode) viewModel.enterSelectionMode(item.id)
+                                },
+                                onFolderClick = { viewModel.selectFolder(it) },
+                                onFolderLongClick = { folderName -> longPressedFolder = folderName }
                             )
                         }
                     }
-                    state.displayItems.isEmpty() -> {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(
-                                    imageVector = when (state.navigationTab) {
-                                        NavigationTab.FAVORITES -> Icons.Default.FavoriteBorder
-                                        NavigationTab.ALBUMS -> Icons.Default.PhotoAlbum
-                                        else -> Icons.Default.PhotoLibrary
-                                    },
-                                    contentDescription = null,
-                                    modifier = Modifier.size(64.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                )
-                                Spacer(Modifier.height(16.dp))
-                                Text(
-                                    text = when (state.navigationTab) {
-                                        NavigationTab.FAVORITES -> "Chưa có ảnh yêu thích"
-                                        else -> if (state.searchQuery.isNotBlank()) "Không tìm thấy kết quả"
-                                        else "Không tìm thấy ảnh hoặc video nào."
-                                    },
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-                    else -> {
-                        val isFolderList = (state.navigationTab == NavigationTab.ALBUMS ||
-                                state.displayMode == DisplayMode.FOLDER) && state.selectedFolder == null
-                        MediaGrid(
-                            items = state.displayItems,
-                            isFolderList = isFolderList,
-                            selectionMode = state.selectionMode,
-                            selectedIds = state.selectedIds,
-                            favoriteIds = state.favoriteIds,
-                            onItemClick = { item ->
-                                if (state.selectionMode) {
-                                    viewModel.toggleItemSelection(item.id)
-                                } else {
-                                    onItemClick(item)
-                                }
-                            },
-                            onItemLongClick = { item ->
-                                if (!state.selectionMode) viewModel.enterSelectionMode(item.id)
-                            },
-                            onFolderClick = { viewModel.selectFolder(it) },
-                            onFolderLongClick = { folderName -> longPressedFolder = folderName }
-                        )
-                    }
                 }
             }
-        }
-    }
+            } // end Column (weight)
+        } // end Row
+    } // end Scaffold
 }
 
 // ── Top bars ───────────────────────────────────────────────────────────────
@@ -459,7 +499,8 @@ private fun MainTopBar(
     onSearch: () -> Unit,
 ) {
     val canChangeDisplayMode = !inFolder &&
-            state.navigationTab != NavigationTab.ALBUMS
+            state.navigationTab != NavigationTab.ALBUMS &&
+            state.navigationTab != NavigationTab.MUSIC
 
     TopAppBar(
         navigationIcon = {
@@ -471,11 +512,12 @@ private fun MainTopBar(
         },
         title = {
             Text(
-                when {
-                    inFolder -> state.selectedFolder ?: ""
-                    state.navigationTab == NavigationTab.ALBUMS -> "Album"
-                    state.navigationTab == NavigationTab.FAVORITES -> "Yêu thích"
-                    else -> when (state.mediaFilter) {
+                    when {
+                        inFolder -> state.selectedFolder ?: ""
+                        state.navigationTab == NavigationTab.ALBUMS -> "Album"
+                        state.navigationTab == NavigationTab.FAVORITES -> "Yêu thích"
+                        state.navigationTab == NavigationTab.MUSIC -> "Nhạc"
+                        else -> when (state.mediaFilter) {
                         MediaTypeFilter.ALL    -> "Thư viện"
                         MediaTypeFilter.IMAGES -> "Ảnh"
                         MediaTypeFilter.VIDEOS -> "Video"
@@ -577,6 +619,96 @@ private fun SearchTopBar(
 
 // ── Bottom bars ────────────────────────────────────────────────────────────
 
+@Composable
+private fun GlobalNavigationBar(
+    currentTab: NavigationTab,
+    onTabSelected: (NavigationTab) -> Unit,
+) {
+    NavigationBar {
+        NavigationBarItem(
+            selected = currentTab == NavigationTab.PHOTOS,
+            onClick = { onTabSelected(NavigationTab.PHOTOS) },
+            icon = { Icon(Icons.Default.PhotoLibrary, contentDescription = "Thư viện") },
+            label = { Text("Thư viện") }
+        )
+        NavigationBarItem(
+            selected = currentTab == NavigationTab.ALBUMS,
+            onClick = { onTabSelected(NavigationTab.ALBUMS) },
+            icon = { Icon(Icons.Default.PhotoAlbum, contentDescription = "Album") },
+            label = { Text("Album") }
+        )
+        NavigationBarItem(
+            selected = currentTab == NavigationTab.FAVORITES,
+            onClick = { onTabSelected(NavigationTab.FAVORITES) },
+            icon = { Icon(Icons.Default.FavoriteBorder, contentDescription = "Yêu thích") },
+            label = { Text("Yêu thích") }
+        )
+        NavigationBarItem(
+            selected = currentTab == NavigationTab.MUSIC,
+            onClick = { onTabSelected(NavigationTab.MUSIC) },
+            icon = { Icon(Icons.Default.MusicNote, contentDescription = "Nhạc") },
+            label = { Text("Nhạc") }
+        )
+    }
+}
+
+@Composable
+private fun GlobalNavigationRail(
+    currentTab: NavigationTab,
+    onTabSelected: (NavigationTab) -> Unit,
+) {
+    NavigationRail(
+        containerColor = NavigationBarDefaults.containerColor,
+    ) {
+        Spacer(Modifier.weight(1f))
+        NavigationRailItem(
+            selected = currentTab == NavigationTab.PHOTOS,
+            onClick = { onTabSelected(NavigationTab.PHOTOS) },
+            icon = { Icon(Icons.Default.PhotoLibrary, contentDescription = "Thư viện") },
+            label = { Text("Thư viện") }
+        )
+        NavigationRailItem(
+            selected = currentTab == NavigationTab.ALBUMS,
+            onClick = { onTabSelected(NavigationTab.ALBUMS) },
+            icon = { Icon(Icons.Default.PhotoAlbum, contentDescription = "Album") },
+            label = { Text("Album") }
+        )
+        NavigationRailItem(
+            selected = currentTab == NavigationTab.FAVORITES,
+            onClick = { onTabSelected(NavigationTab.FAVORITES) },
+            icon = { Icon(Icons.Default.FavoriteBorder, contentDescription = "Yêu thích") },
+            label = { Text("Yêu thích") }
+        )
+        NavigationRailItem(
+            selected = currentTab == NavigationTab.MUSIC,
+            onClick = { onTabSelected(NavigationTab.MUSIC) },
+            icon = { Icon(Icons.Default.MusicNote, contentDescription = "Nhạc") },
+            label = { Text("Nhạc") }
+        )
+        Spacer(Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun MediaTypeFilterRow(
+    selectedIndex: Int,
+    onAll: () -> Unit,
+    onImages: () -> Unit,
+    onVideos: () -> Unit,
+) {
+    ScrollableTabRow(
+        selectedTabIndex = selectedIndex,
+        edgePadding = 8.dp,
+        divider = {}
+    ) {
+        Tab(selected = selectedIndex == 0, onClick = onAll,
+            text = { Text("Tất cả", style = MaterialTheme.typography.labelMedium) })
+        Tab(selected = selectedIndex == 1, onClick = onImages,
+            text = { Text("Ảnh", style = MaterialTheme.typography.labelMedium) })
+        Tab(selected = selectedIndex == 2, onClick = onVideos,
+            text = { Text("Video", style = MaterialTheme.typography.labelMedium) })
+    }
+}
 
 @Composable
 private fun SelectionBottomBar(
@@ -614,41 +746,6 @@ private fun SelectionAction(icon: ImageVector, label: String, onClick: () -> Uni
     }
 }
 
-@Composable
-private fun MediaTypeBottomBar(
-    selectedIndex: Int,
-    onAll: () -> Unit,
-    onImages: () -> Unit,
-    onVideos: () -> Unit,
-    onFolder: () -> Unit,
-) {
-    NavigationBar {
-        NavigationBarItem(
-            selected = selectedIndex == 0,
-            onClick = onAll,
-            icon = { Icon(Icons.Default.PhotoLibrary, contentDescription = "Tất cả") },
-            label = { Text("Tất cả") }
-        )
-        NavigationBarItem(
-            selected = selectedIndex == 1,
-            onClick = onImages,
-            icon = { Icon(Icons.Default.Image, contentDescription = "Ảnh") },
-            label = { Text("Ảnh") }
-        )
-        NavigationBarItem(
-            selected = selectedIndex == 2,
-            onClick = onVideos,
-            icon = { Icon(Icons.Default.Videocam, contentDescription = "Video") },
-            label = { Text("Video") }
-        )
-        NavigationBarItem(
-            selected = selectedIndex == 3,
-            onClick = onFolder,
-            icon = { Icon(Icons.Default.Folder, contentDescription = "Thư mục") },
-            label = { Text("Thư mục") }
-        )
-    }
-}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -687,7 +784,12 @@ private fun MediaGrid(
     onFolderClick: (String) -> Unit,
     onFolderLongClick: (String) -> Unit,
 ) {
-    val columns = if (isFolderList) 3 else 4
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val columns = when {
+        isFolderList -> if (isLandscape) 4 else 3
+        else         -> if (isLandscape) 6 else 4
+    }
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
         contentPadding = PaddingValues(

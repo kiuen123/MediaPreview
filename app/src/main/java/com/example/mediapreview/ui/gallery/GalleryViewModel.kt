@@ -40,7 +40,7 @@ enum class MediaTypeFilter { ALL, IMAGES, VIDEOS }
 enum class DisplayMode { FLAT, DATE, FOLDER }
 
 /** Bottom navigation tabs, Samsung OneUI Gallery style. */
-enum class NavigationTab { PHOTOS, ALBUMS, FAVORITES }
+enum class NavigationTab { PHOTOS, ALBUMS, FAVORITES, MUSIC }
 
 // ── List item model ────────────────────────────────────────────────────────
 
@@ -534,6 +534,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 )
                 DisplayMode.FOLDER -> groupByFolder(filtered, selectedFolder, lockedFolderNames)
             }
+            // MUSIC tab: media list is handled by MusicViewModel/MusicScreen separately
+            NavigationTab.MUSIC -> emptyList()
         }
 
         // ── Locked-folder override ─────────────────────────────────────────────
