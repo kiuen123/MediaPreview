@@ -1,8 +1,10 @@
 package com.example.mediapreview.ui.viewer
 
 import android.app.Activity
+import android.app.WallpaperManager
 import android.content.ClipData
 import android.content.Intent
+import android.media.ExifInterface
 import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -21,6 +23,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.geometry.Offset
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -128,6 +132,9 @@ fun MediaPagerScreen(
                     val request = MediaStore.createDeleteRequest(context.contentResolver, uris)
                     deleteLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
                 }
+                is GalleryEvent.RequestShare,
+                is GalleryEvent.RequestTrash,
+                is GalleryEvent.RequestRestore -> { /* handled in GalleryScreen */ }
             }
         }
     }
@@ -218,6 +225,30 @@ fun MediaPagerScreen(
                             "Yêu thích",
                             tint = if (isFav) Color(0xFFFF4081) else Color.White
                         )
+                    }
+                    // Edit button (images only)
+                    if (!currentItem.isVideo) {
+                        IconButton(onClick = {
+                            val intent = Intent(Intent.ACTION_EDIT).apply {
+                                setDataAndType(currentItem.uri, currentItem.mimeType)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(intent, "Chỉnh sửa ảnh"))
+                        }) {
+                            Icon(Icons.Default.Edit, "Chỉnh sửa", tint = Color.White)
+                        }
+                        // Wallpaper button
+                        IconButton(onClick = {
+                            val intent = Intent(Intent.ACTION_ATTACH_DATA).apply {
+                                addCategory(Intent.CATEGORY_DEFAULT)
+                                setDataAndType(currentItem.uri, currentItem.mimeType)
+                                putExtra("mimeType", currentItem.mimeType)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(intent, "Đặt làm hình nền"))
+                        }) {
+                            Icon(Icons.Default.Wallpaper, "Đặt làm hình nền", tint = Color.White)
+                        }
                     }
                     IconButton(onClick = { viewModel.requestShareItem(currentItem) }) {
                         Icon(Icons.Default.Share, "Chia sẻ", tint = Color.White)
@@ -408,6 +439,25 @@ private fun MediaInfoSheet(
     onDismiss: () -> Unit,
     onToggleFavorite: () -> Unit
 ) {
+    val context = LocalContext.current
+    // Load GPS data lazily
+    var gpsText by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(item.uri) {
+        if (!item.isVideo) {
+            withContext(Dispatchers.IO) {
+                try {
+                    context.contentResolver.openInputStream(item.uri)?.use { stream ->
+                        val exif = ExifInterface(stream)
+                        val latLong = FloatArray(2)
+                        if (exif.getLatLong(latLong)) {
+                            gpsText = "%.5f, %.5f".format(latLong[0], latLong[1])
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
@@ -427,6 +477,9 @@ private fun MediaInfoSheet(
             if (item.fileSize > 0) {
                 InfoRow(Icons.Default.Storage, "Kích thước", formatFileSize(item.fileSize))
             }
+            if (item.hasResolution) {
+                InfoRow(Icons.Default.AspectRatio, "Độ phân giải", item.resolution)
+            }
             if (item.folderName.isNotBlank()) {
                 InfoRow(Icons.Default.Folder, "Thư mục", item.folderName)
             }
@@ -434,6 +487,38 @@ private fun MediaInfoSheet(
                 InfoRow(Icons.Default.Timer, "Thời lượng", formatDuration(item.duration))
             }
             InfoRow(Icons.Default.Image, "Loại tệp", item.mimeType)
+            if (gpsText != null) {
+                val lat = gpsText!!.substringBefore(",").trim().toFloatOrNull()
+                val lon = gpsText!!.substringAfter(",").trim().toFloatOrNull()
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(Icons.Default.LocationOn, null,
+                        modifier = Modifier.size(18.dp).padding(top = 1.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Vị trí GPS", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(gpsText!!, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    if (lat != null && lon != null) {
+                        TextButton(
+                            onClick = {
+                                val uri = android.net.Uri.parse("geo:$lat,$lon?q=$lat,$lon")
+                                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
+                                context.startActivity(intent)
+                            },
+                            modifier = Modifier.align(Alignment.CenterVertically)
+                        ) {
+                            Icon(Icons.Default.Map, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Xem bản đồ", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
 
             Spacer(Modifier.height(16.dp))
             HorizontalDivider()

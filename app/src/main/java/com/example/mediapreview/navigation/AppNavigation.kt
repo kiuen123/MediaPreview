@@ -16,16 +16,18 @@ import androidx.navigation.navArgument
 import com.example.mediapreview.ui.gallery.GalleryScreen
 import com.example.mediapreview.ui.gallery.GalleryViewModel
 import com.example.mediapreview.ui.music.MusicViewModel
+import com.example.mediapreview.ui.settings.SettingsScreen
+import com.example.mediapreview.ui.settings.SettingsViewModel
 import com.example.mediapreview.ui.viewer.MediaPagerScreen
 
 @Composable
 fun AppNavigation() {
     val navController = rememberNavController()
 
-    // Activity-scoped ViewModel shared between gallery and viewer
     val activity = LocalContext.current as ComponentActivity
     val sharedViewModel: GalleryViewModel = viewModel(viewModelStoreOwner = activity)
     val musicViewModel: MusicViewModel = viewModel(viewModelStoreOwner = activity)
+    val settingsViewModel: SettingsViewModel = viewModel(viewModelStoreOwner = activity)
 
     NavHost(
         navController = navController,
@@ -40,6 +42,7 @@ fun AppNavigation() {
             GalleryScreen(
                 viewModel = sharedViewModel,
                 musicViewModel = musicViewModel,
+                onOpenSettings = { navController.navigate("settings") },
                 onItemClick = { item ->
                     val mediaItems = sharedViewModel.getCurrentMediaItems()
                     sharedViewModel.setViewerItems(mediaItems)
@@ -57,6 +60,13 @@ fun AppNavigation() {
             MediaPagerScreen(
                 initialIndex = index,
                 viewModel = sharedViewModel,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("settings") {
+            SettingsScreen(
+                viewModel = settingsViewModel,
                 onBack = { navController.popBackStack() }
             )
         }

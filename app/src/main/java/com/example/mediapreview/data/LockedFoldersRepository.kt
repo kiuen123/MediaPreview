@@ -62,6 +62,11 @@ class LockedFoldersRepository(context: Context) {
     fun getSecurePath(folderName: String): String? =
         prefs.getString(folderName + SECURE_PATH_SUFFIX, null)
 
+    /** Change password without unlocking the folder. */
+    fun changePassword(folderName: String, newPassword: String) {
+        prefs.edit().putString(folderName, hash(folderName, newPassword)).apply()
+    }
+
     fun verifyPassword(folderName: String, password: String): Boolean {
         val stored = prefs.getString(folderName, null) ?: return false
         return stored == hash(folderName, password)
