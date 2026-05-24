@@ -8,6 +8,8 @@ import android.os.Looper
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.core.content.FileProvider
+import com.example.mediapreview.data.AppFolderPermissionRepository
 import com.example.mediapreview.data.CustomAlbumInfo
 import com.example.mediapreview.data.CustomAlbumsRepository
 import com.example.mediapreview.data.FavoritesRepository
@@ -103,6 +105,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val nomediaManager = NomediaManager(application)
     private val pinnedFoldersRepo = PinnedFoldersRepository(application)
     private val customAlbumsRepo = CustomAlbumsRepository(application)
+    private val appPermissionRepo = AppFolderPermissionRepository(application)
 
     private val _state = MutableStateFlow(
         GalleryState(
@@ -133,6 +136,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val cr = application.contentResolver
         cr.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, mediaObserver)
         cr.registerContentObserver(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, mediaObserver)
+        // Restore ephemeral URI grants that may have been lost after a device reboot.
+        viewModelScope.launch(Dispatchers.IO) { appPermissionRepo.reGrantAllPermissions() }
     }
 
     override fun onCleared() {
@@ -364,6 +369,31 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun lockFolderWithBiometric(folderName: String) {
+        viewModelScope.launch {
+            val folderPath = withContext(Dispatchers.IO) { nomediaManager.getFolderPath(folderName) }
+            val itemCount = _state.value.rawAllMedia.count { it.folderName.ifBlank { "Khác" } == folderName }
+            lockedFoldersRepo.lockFolderBiometric(folderName, folderPath, itemCount)
+            val locked = lockedFoldersRepo.getLockedFolders()
+            val cur = _state.value
+            rebuild(cur.rawAllMedia, cur.mediaFilter, cur.displayMode, cur.selectedFolder,
+                cur.navigationTab, cur.searchQuery, cur.favoriteIds, locked)
+            if (folderPath != null && nomediaManager.hasPermission()) {
+                withContext(Dispatchers.IO) {
+                    val securePath = nomediaManager.moveToSecureStorage(folderPath, folderName)
+                    if (securePath != null) lockedFoldersRepo.saveSecurePath(folderName, securePath)
+                    nomediaManager.createNomedia(folderPath)
+                    nomediaManager.hideFromMediaStore(folderPath)
+                    nomediaManager.scanFolderAfterNomedia(folderPath)
+                }
+                loadMedia()
+            }
+        }
+    }
+
+    fun isBiometricOnly(folderName: String): Boolean =
+        lockedFoldersRepo.isBiometricOnly(folderName)
+
     fun verifyFolderPassword(folderName: String, password: String): Boolean =
         lockedFoldersRepo.verifyPassword(folderName, password)
 
@@ -372,6 +402,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val folderPath = lockedFoldersRepo.getFolderPath(folderName)
         val securePath = lockedFoldersRepo.getSecurePath(folderName)
         lockedFoldersRepo.unlockFolder(folderName)
+        // Revoke all per-app permissions for the unlocked folder.
+        appPermissionRepo.revokeAllForFolder(folderName)
         val locked = lockedFoldersRepo.getLockedFolders()
         val cur = _state.value
         rebuild(cur.rawAllMedia, cur.mediaFilter, cur.displayMode, cur.selectedFolder,
@@ -384,6 +416,24 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             withContext(Dispatchers.Main) { loadMedia() }
         }
         return true
+    }
+
+    fun permanentlyUnlockFolderWithoutPassword(folderName: String) {
+        val folderPath = lockedFoldersRepo.getFolderPath(folderName)
+        val securePath = lockedFoldersRepo.getSecurePath(folderName)
+        lockedFoldersRepo.unlockFolder(folderName)
+        appPermissionRepo.revokeAllForFolder(folderName)
+        val locked = lockedFoldersRepo.getLockedFolders()
+        val cur = _state.value
+        rebuild(cur.rawAllMedia, cur.mediaFilter, cur.displayMode, cur.selectedFolder,
+            cur.navigationTab, cur.searchQuery, cur.favoriteIds, locked)
+        viewModelScope.launch(Dispatchers.IO) {
+            if (nomediaManager.hasPermission()) {
+                if (securePath != null && folderPath != null) nomediaManager.moveFromSecureStorage(securePath, folderPath)
+                if (folderPath != null) { nomediaManager.deleteNomedia(folderPath); nomediaManager.unhideFromMediaStore(folderPath) }
+            }
+            withContext(Dispatchers.Main) { loadMedia() }
+        }
     }
 
     fun openLockedFolder(folderName: String) {
@@ -418,6 +468,33 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         if (!lockedFoldersRepo.verifyPassword(folderName, oldPassword)) return false
         lockedFoldersRepo.changePassword(folderName, newPassword)
         return true
+    }
+
+    // ── App folder permissions ─────────────────────────────────────────────
+
+    /** Returns the set of package names that have been granted access to [folderName]. */
+    fun getGrantedAppsForFolder(folderName: String): Set<String> =
+        appPermissionRepo.getGrantedApps(folderName)
+
+    /**
+     * Grant [packageName] read access to the locked folder [folderName].
+     * Persists the grant and issues OS-level URI permissions for all files
+     * currently in the folder's secure storage directory.
+     */
+    fun grantAppFolderPermission(folderName: String, packageName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            appPermissionRepo.grantPermission(folderName, packageName)
+        }
+    }
+
+    /**
+     * Revoke [packageName]'s access to [folderName].
+     * Removes the persisted record and revokes OS URI permissions.
+     */
+    fun revokeAppFolderPermission(folderName: String, packageName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            appPermissionRepo.revokePermission(folderName, packageName)
+        }
     }
 
     // ── Selection ──────────────────────────────────────────────────────────
@@ -677,14 +754,32 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private fun loadItemsFromFilesystem(folderName: String, folderPath: String): List<GalleryItem> {
         val extensions = setOf("jpg","jpeg","png","gif","webp","bmp","heic","heif","avif",
             "mp4","3gp","mkv","avi","mov","wmv","flv","webm","ts","m4v")
+        val app = getApplication<Application>()
         return File(folderPath).listFiles()
             ?.filter { it.isFile && it.extension.lowercase() in extensions }
             ?.map { file ->
+                // Use FileProvider (content://) URI instead of file:// URI.
+                // file:// URIs are blocked by Android 7+ for inter-app sharing, so
+                // FLAG_GRANT_READ_URI_PERMISSION has no effect on them.  content://
+                // URIs from FileProvider work correctly with that flag and allow apps
+                // such as Discord, Telegram, etc. to read the shared files.
+                val uri = try {
+                    FileProvider.getUriForFile(app, "${app.packageName}.provider", file)
+                } catch (_: Exception) {
+                    // Fallback: file not covered by FileProvider paths (shouldn't
+                    // happen for locked files, but guard against it).
+                    @Suppress("DEPRECATION")
+                    Uri.fromFile(file)
+                }
                 GalleryItem(
-                    id = file.absolutePath.hashCode().toLong(), uri = Uri.fromFile(file),
-                    name = file.name, dateAdded = file.lastModified() / 1000L,
-                    mimeType = mimeTypeOf(file), folderName = folderName,
-                    dateTaken = file.lastModified(), fileSize = file.length(),
+                    id        = file.absolutePath.hashCode().toLong(),
+                    uri       = uri,
+                    name      = file.name,
+                    dateAdded = file.lastModified() / 1000L,
+                    mimeType  = mimeTypeOf(file),
+                    folderName = folderName,
+                    dateTaken  = file.lastModified(),
+                    fileSize   = file.length(),
                 )
             }?.sortedByDescending { it.effectiveTimeMs } ?: emptyList()
     }

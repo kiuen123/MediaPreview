@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!--
+        Expose files inside Android/data/com.example.mediapreview/files/locked/
+        so that FileProvider can create content:// URIs for locked-folder files.
+        Other apps can only open a URI if they have been granted permission via
+        Context.grantUriPermission() – the OS enforces this automatically.
+    -->
+    <external-files-path name="locked_media" path="locked/" />
+</paths>
+

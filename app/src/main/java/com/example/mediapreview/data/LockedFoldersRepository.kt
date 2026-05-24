@@ -6,13 +6,14 @@ import java.security.MessageDigest
 class LockedFoldersRepository(context: Context) {
     private val prefs = context.getSharedPreferences("locked_folders", Context.MODE_PRIVATE)
 
-    /** Returns names of all locked folders (excludes internal path/count/securePath storage keys). */
+    /** Returns names of all locked folders (excludes internal path/count/securePath/biometric storage keys). */
     fun getLockedFolders(): Set<String> =
         prefs.all.keys
             .filter { key ->
                 !key.endsWith(PATH_SUFFIX) &&
                 !key.endsWith(COUNT_SUFFIX) &&
-                !key.endsWith(SECURE_PATH_SUFFIX)
+                !key.endsWith(SECURE_PATH_SUFFIX) &&
+                !key.endsWith(BIOMETRIC_SUFFIX)
             }
             .toSet()
 
@@ -62,6 +63,31 @@ class LockedFoldersRepository(context: Context) {
     fun getSecurePath(folderName: String): String? =
         prefs.getString(folderName + SECURE_PATH_SUFFIX, null)
 
+    /**
+     * Lock a folder using biometric-only authentication.
+     * An internal random UUID is used as the password (user never sees it).
+     * The folder is flagged as biometric-only so the UI can skip the password field.
+     */
+    fun lockFolderBiometric(
+        folderName: String,
+        folderPath: String? = null,
+        itemCount: Int = 0,
+    ) {
+        val internalPassword = java.util.UUID.randomUUID().toString()
+        prefs.edit()
+            .putString(folderName, hash(folderName, internalPassword))
+            .putBoolean(folderName + BIOMETRIC_SUFFIX, true)
+            .also { ed ->
+                if (folderPath != null) ed.putString(folderName + PATH_SUFFIX, folderPath)
+                ed.putInt(folderName + COUNT_SUFFIX, itemCount)
+            }
+            .apply()
+    }
+
+    /** Returns true if this folder was locked with biometrics only (no user-known password). */
+    fun isBiometricOnly(folderName: String): Boolean =
+        prefs.getBoolean(folderName + BIOMETRIC_SUFFIX, false)
+
     /** Change password without unlocking the folder. */
     fun changePassword(folderName: String, newPassword: String) {
         prefs.edit().putString(folderName, hash(folderName, newPassword)).apply()
@@ -78,6 +104,7 @@ class LockedFoldersRepository(context: Context) {
             .remove(folderName + PATH_SUFFIX)
             .remove(folderName + COUNT_SUFFIX)
             .remove(folderName + SECURE_PATH_SUFFIX)
+            .remove(folderName + BIOMETRIC_SUFFIX)
             .apply()
     }
 
@@ -92,5 +119,7 @@ class LockedFoldersRepository(context: Context) {
         private const val COUNT_SUFFIX       = "\u0000count"
         /** Path inside Android/data/<package>/files/locked/ where files were moved. */
         private const val SECURE_PATH_SUFFIX = "\u0000securePath"
+        /** Flag indicating the folder was locked with biometric-only (no user-known password). */
+        private const val BIOMETRIC_SUFFIX   = "\u0000biometric"
     }
 }

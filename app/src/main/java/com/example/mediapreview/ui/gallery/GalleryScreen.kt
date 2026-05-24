@@ -4,6 +4,9 @@ import android.Manifest
 import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
@@ -25,9 +28,12 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -62,7 +68,10 @@ import com.example.mediapreview.data.GalleryItem
 import com.example.mediapreview.ui.music.MusicScreen
 import com.example.mediapreview.ui.music.MusicViewModel
 import com.example.mediapreview.util.BiometricHelper
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.withContext
+import java.io.File
 import androidx.compose.ui.platform.LocalConfiguration
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -95,6 +104,8 @@ fun GalleryScreen(
     var folderToChangePassword by remember { mutableStateOf<String?>(null) }
     var pendingLockAfterPermission by remember { mutableStateOf<String?>(null) }
     var showStoragePermissionDialog by remember { mutableStateOf(false) }
+    // ── App-permission dialog state ────────────────────────────────────────
+    var folderToManageAppPermissions by remember { mutableStateOf<String?>(null) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(lifecycleOwner) {
@@ -217,9 +228,11 @@ fun GalleryScreen(
     // ── Password dialogs ───────────────────────────────────────────────────
 
     state.pendingPasswordFolder?.let { folderName ->
+        val isBiometricOnly = viewModel.isBiometricOnly(folderName)
         EnterPasswordDialog(
             title = "Mở thư mục đã khóa",
-            message = "Nhập mật khẩu để xem nội dung của \"$folderName\"",
+            message = if (isBiometricOnly) "Xác thực để xem nội dung của \"$folderName\""
+                      else "Nhập mật khẩu để xem nội dung của \"$folderName\"",
             confirmLabel = "Mở",
             onConfirm = { pwd ->
                 if (viewModel.verifyFolderPassword(folderName, pwd)) { viewModel.openLockedFolder(folderName); true }
@@ -233,14 +246,31 @@ fun GalleryScreen(
                     )
                 }
             }) else null,
+            biometricOnly = isBiometricOnly,
             onDismiss = { viewModel.clearPendingPasswordFolder() }
         )
     }
 
     folderToSetPassword?.let { folderName ->
-        SetPasswordDialog(folderName = folderName,
+        SetPasswordDialog(
+            folderName = folderName,
             onConfirm = { pwd -> viewModel.lockFolder(folderName, pwd); folderToSetPassword = null },
-            onDismiss = { folderToSetPassword = null })
+            onBiometricLock = if (BiometricHelper.isAvailable(context)) ({
+                (context as? FragmentActivity)?.let { activity ->
+                    BiometricHelper.authenticate(
+                        activity = activity,
+                        title = "Khóa \"$folderName\"",
+                        subtitle = "Xác nhận sinh trắc học để khóa thư mục",
+                        onSuccess = {
+                            viewModel.lockFolderWithBiometric(folderName)
+                            folderToSetPassword = null
+                        },
+                        onError = { /* ignore */ }
+                    )
+                }
+            }) else null,
+            onDismiss = { folderToSetPassword = null }
+        )
     }
 
     folderToChangePassword?.let { folderName ->
@@ -253,22 +283,42 @@ fun GalleryScreen(
     }
 
     folderToRemoveLock?.let { folderName ->
+        val isBiometricOnly = viewModel.isBiometricOnly(folderName)
         EnterPasswordDialog(
             title = "Gỡ khóa thư mục",
-            message = "Nhập mật khẩu hiện tại để gỡ khóa \"$folderName\"",
+            message = if (isBiometricOnly) "Xác thực để gỡ khóa \"$folderName\""
+                      else "Nhập mật khẩu hiện tại để gỡ khóa \"$folderName\"",
             confirmLabel = "Gỡ khóa",
             onConfirm = { pwd ->
                 if (viewModel.permanentlyUnlockFolder(folderName, pwd)) { folderToRemoveLock = null; true }
                 else false
             },
-            onBiometricAuth = null,
+            onBiometricAuth = if (BiometricHelper.isAvailable(context)) ({
+                (context as? FragmentActivity)?.let { activity ->
+                    BiometricHelper.authenticate(
+                        activity = activity,
+                        title = "Gỡ khóa \"$folderName\"",
+                        onSuccess = {
+                            viewModel.permanentlyUnlockFolderWithoutPassword(folderName)
+                            folderToRemoveLock = null
+                        },
+                        onError = { /* ignore */ }
+                    )
+                }
+            }) else null,
+            biometricOnly = isBiometricOnly,
             onDismiss = { folderToRemoveLock = null }
         )
     }
 
     longPressedFolder?.let { folderName ->
         val isLocked = folderName in state.lockedFolderNames
+        val isBiometricOnly = isLocked && viewModel.isBiometricOnly(folderName)
         val isPinned = folderName in state.pinnedFolderNames
+        // Pre-build granted apps list so we can show "Open in …" shortcuts
+        val grantedApps = remember(folderName, state.lockedFolderNames) {
+            if (isLocked) viewModel.getGrantedAppsForFolder(folderName) else emptySet()
+        }
         AlertDialog(
             onDismissRequest = { longPressedFolder = null },
             title = { Text(folderName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -281,10 +331,43 @@ fun GalleryScreen(
                         Text(if (isPinned) "Bỏ ghim thư mục" else "Ghim thư mục lên đầu")
                     }
                     if (isLocked) {
-                        TextButton(onClick = { longPressedFolder = null; folderToChangePassword = folderName },
+                        if (!isBiometricOnly) {
+                            TextButton(onClick = { longPressedFolder = null; folderToChangePassword = folderName },
+                                modifier = Modifier.fillMaxWidth()) {
+                                Icon(Icons.Default.Key, null, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(8.dp)); Text("Đổi mật khẩu")
+                            }
+                        }
+                        TextButton(onClick = { longPressedFolder = null; folderToManageAppPermissions = folderName },
                             modifier = Modifier.fillMaxWidth()) {
-                            Icon(Icons.Default.Key, null, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(8.dp)); Text("Đổi mật khẩu")
+                            Icon(Icons.Default.PhoneAndroid, null, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp)); Text("Cấp quyền cho ứng dụng")
+                        }
+                        // Quick "Open in …" shortcuts for already-granted apps
+                        if (grantedApps.isNotEmpty()) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                            val pm = context.packageManager
+                            grantedApps.forEach { pkg ->
+                                val appLabel = remember(pkg) {
+                                    try {
+                                        @Suppress("DEPRECATION")
+                                        pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                                    } catch (_: Exception) { pkg }
+                                }
+                                TextButton(
+                                    onClick = {
+                                        longPressedFolder = null
+                                        val uris = buildFileUrisForFolder(context, folderName)
+                                        openFilesInApp(context, pkg, uris)
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Icon(Icons.Default.OpenInNew, null, modifier = Modifier.size(20.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Mở trong $appLabel", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                         }
                         TextButton(onClick = { longPressedFolder = null; folderToRemoveLock = folderName },
                             modifier = Modifier.fillMaxWidth()) {
@@ -348,35 +431,63 @@ fun GalleryScreen(
             onDismiss = { showStoragePermissionDialog = false; pendingLockAfterPermission = null })
     }
 
+    folderToManageAppPermissions?.let { folderName ->
+        AppPermissionManagerDialog(
+            folderName = folderName,
+            viewModel  = viewModel,
+            onDismiss  = { folderToManageAppPermissions = null },
+        )
+    }
+
+    // Compact title text for landscape rail header
+    val railTitle = when {
+        inCustomAlbum -> state.selectedCustomAlbum ?: ""
+        inFolder      -> state.selectedFolder ?: ""
+        state.navigationTab == NavigationTab.ALBUMS    -> "Album"
+        state.navigationTab == NavigationTab.FAVORITES -> "Yêu thích"
+        state.navigationTab == NavigationTab.MUSIC     -> "Nhạc"
+        state.navigationTab == NavigationTab.TRASH     -> "Thùng rác"
+        else -> when (state.mediaFilter) {
+            MediaTypeFilter.ALL    -> "Thư viện"
+            MediaTypeFilter.IMAGES -> "Ảnh"
+            MediaTypeFilter.VIDEOS -> "Video"
+        }
+    }
+    // In landscape with nav rail at root level: hide normal topBar (title goes into rail header)
+    val showingRailWithTitle = useNavigationRail && !state.selectionMode && !searchActive && !inFolder && !inCustomAlbum
+
     Scaffold(
         topBar = {
-            when {
-                state.selectionMode -> SelectionTopBar(
-                    count = state.selectedIds.size,
-                    total = state.displayItems.filterIsInstance<GalleryListItem.Media>().size,
-                    onClose = { viewModel.clearSelection() },
-                    onSelectAll = { viewModel.selectAll() }
-                )
-                searchActive -> SearchTopBar(
-                    query = searchText,
-                    onQueryChange = { q -> searchText = q; viewModel.setSearchQuery(q) },
-                    onClose = { searchActive = false; searchText = ""; viewModel.setSearchQuery("") }
-                )
-                else -> MainTopBar(
-                    state = state,
-                    inFolder = inFolder,
-                    inCustomAlbum = inCustomAlbum,
-                    showModeMenu = showModeMenu,
-                    onShowModeMenu = { showModeMenu = true },
-                    onDismissModeMenu = { showModeMenu = false },
-                    onSetDisplayMode = { viewModel.setDisplayMode(it); showModeMenu = false },
-                    onBack = {
-                        if (inCustomAlbum) viewModel.selectCustomAlbum(null)
-                        else viewModel.selectFolder(null)
-                    },
-                    onSearch = { searchActive = true },
-                    onSettings = onOpenSettings
-                )
+            // In landscape with nav rail: no separate topBar — title goes into rail header
+            if (!showingRailWithTitle) {
+                when {
+                    state.selectionMode -> SelectionTopBar(
+                        count = state.selectedIds.size,
+                        total = state.displayItems.filterIsInstance<GalleryListItem.Media>().size,
+                        onClose = { viewModel.clearSelection() },
+                        onSelectAll = { viewModel.selectAll() }
+                    )
+                    searchActive -> SearchTopBar(
+                        query = searchText,
+                        onQueryChange = { q -> searchText = q; viewModel.setSearchQuery(q) },
+                        onClose = { searchActive = false; searchText = ""; viewModel.setSearchQuery("") }
+                    )
+                    else -> MainTopBar(
+                        state = state,
+                        inFolder = inFolder,
+                        inCustomAlbum = inCustomAlbum,
+                        showModeMenu = showModeMenu,
+                        onShowModeMenu = { showModeMenu = true },
+                        onDismissModeMenu = { showModeMenu = false },
+                        onSetDisplayMode = { viewModel.setDisplayMode(it); showModeMenu = false },
+                        onBack = {
+                            if (inCustomAlbum) viewModel.selectCustomAlbum(null)
+                            else viewModel.selectFolder(null)
+                        },
+                        onSearch = { searchActive = true },
+                        onSettings = onOpenSettings
+                    )
+                }
             }
         },
         floatingActionButton = {
@@ -419,7 +530,7 @@ fun GalleryScreen(
         }
     ) { paddingValues ->
         Row(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
-            if (useNavigationRail && !state.selectionMode && !searchActive && !inFolder && !inCustomAlbum) {
+            if (showingRailWithTitle) {
                 GlobalNavigationRail(
                     currentTab = state.navigationTab,
                     onTabSelected = { tab ->
@@ -430,7 +541,24 @@ fun GalleryScreen(
             }
 
             Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                // Media-type filter tabs (Photos tab, not inside folder)
+                // Compact header for landscape (title + actions above content)
+                if (showingRailWithTitle) {
+                    val canChangeDisplayMode = state.navigationTab != NavigationTab.ALBUMS &&
+                            state.navigationTab != NavigationTab.MUSIC &&
+                            state.navigationTab != NavigationTab.TRASH
+                    LandscapeContentHeader(
+                        title = railTitle,
+                        displayMode = state.displayMode,
+                        showModeMenu = showModeMenu,
+                        canChangeDisplayMode = canChangeDisplayMode,
+                        onShowModeMenu = { showModeMenu = true },
+                        onDismissModeMenu = { showModeMenu = false },
+                        onSetDisplayMode = { viewModel.setDisplayMode(it); showModeMenu = false },
+                        onSearch = { searchActive = true },
+                        onSettings = onOpenSettings
+                    )
+                    HorizontalDivider(thickness = 0.5.dp)
+                }
                 if (!searchActive && !state.selectionMode
                     && state.navigationTab == NavigationTab.PHOTOS && !inFolder) {
                     val selectedTabIndex = when (state.mediaFilter) {
@@ -704,9 +832,58 @@ private fun GlobalNavigationBar(currentTab: NavigationTab, onTabSelected: (Navig
 }
 
 @Composable
-private fun GlobalNavigationRail(currentTab: NavigationTab, onTabSelected: (NavigationTab) -> Unit) {
-    NavigationRail(containerColor = NavigationBarDefaults.containerColor) {
-        Spacer(Modifier.weight(1f))
+private fun LandscapeContentHeader(
+    title: String,
+    displayMode: DisplayMode,
+    showModeMenu: Boolean,
+    canChangeDisplayMode: Boolean,
+    onShowModeMenu: () -> Unit,
+    onDismissModeMenu: () -> Unit,
+    onSetDisplayMode: (DisplayMode) -> Unit,
+    onSearch: () -> Unit,
+    onSettings: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(start = 8.dp)
+        )
+        IconButton(onClick = onSearch) { Icon(Icons.Default.Search, "Tìm kiếm", modifier = Modifier.size(20.dp)) }
+        if (canChangeDisplayMode) {
+            Box {
+                IconButton(onClick = onShowModeMenu) { Icon(displayMode.icon(), "Chế độ hiển thị", modifier = Modifier.size(20.dp)) }
+                DropdownMenu(expanded = showModeMenu, onDismissRequest = onDismissModeMenu) {
+                    DisplayModeMenuItem("Mới đến cũ", DisplayMode.FLAT.icon(), displayMode == DisplayMode.FLAT) { onSetDisplayMode(DisplayMode.FLAT) }
+                    DisplayModeMenuItem("Theo ngày", DisplayMode.DATE.icon(), displayMode == DisplayMode.DATE) { onSetDisplayMode(DisplayMode.DATE) }
+                    DisplayModeMenuItem("Theo tháng", DisplayMode.MONTH.icon(), displayMode == DisplayMode.MONTH) { onSetDisplayMode(DisplayMode.MONTH) }
+                    DisplayModeMenuItem("Theo năm", DisplayMode.YEAR.icon(), displayMode == DisplayMode.YEAR) { onSetDisplayMode(DisplayMode.YEAR) }
+                }
+            }
+        }
+        IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "Cài đặt", modifier = Modifier.size(20.dp)) }
+    }
+}
+
+@Composable
+private fun GlobalNavigationRail(
+    currentTab: NavigationTab,
+    onTabSelected: (NavigationTab) -> Unit,
+) {
+    NavigationRail(
+        containerColor = NavigationBarDefaults.containerColor,
+        windowInsets = WindowInsets(0),
+        modifier = Modifier.fillMaxHeight(),
+    ) {
         NavigationRailItem(selected = currentTab == NavigationTab.PHOTOS, onClick = { onTabSelected(NavigationTab.PHOTOS) },
             icon = { Icon(Icons.Default.PhotoLibrary, "Thư viện") }, label = { Text("Thư viện") })
         NavigationRailItem(selected = currentTab == NavigationTab.ALBUMS, onClick = { onTabSelected(NavigationTab.ALBUMS) },
@@ -1188,7 +1365,12 @@ private fun ManageStoragePermissionDialog(context: android.content.Context, onDi
 }
 
 @Composable
-private fun SetPasswordDialog(folderName: String, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+private fun SetPasswordDialog(
+    folderName: String,
+    onConfirm: (String) -> Unit,
+    onBiometricLock: (() -> Unit)? = null,
+    onDismiss: () -> Unit,
+) {
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
@@ -1212,6 +1394,16 @@ private fun SetPasswordDialog(folderName: String, onConfirm: (String) -> Unit, o
                     modifier = Modifier.fillMaxWidth())
                 if (errorMsg != null) Text(errorMsg!!, color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.labelSmall)
+                if (onBiometricLock != null) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    Text("Hoặc khóa bằng sinh trắc học", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = onBiometricLock, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Fingerprint, null, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Dùng vân tay / khuôn mặt để khóa")
+                    }
+                }
             }
         },
         confirmButton = {
@@ -1233,6 +1425,7 @@ private fun EnterPasswordDialog(
     title: String, message: String, confirmLabel: String,
     onConfirm: (String) -> Boolean,
     onBiometricAuth: (() -> Unit)?,
+    biometricOnly: Boolean = false,
     onDismiss: () -> Unit,
 ) {
     var password by remember { mutableStateOf("") }
@@ -1243,18 +1436,28 @@ private fun EnterPasswordDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(message, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedTextField(value = password, onValueChange = { password = it; showError = false },
-                    label = { Text("Mật khẩu") }, singleLine = true, isError = showError,
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    trailingIcon = { IconButton(onClick = { showPassword = !showPassword }) {
-                        Icon(if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility, null)
-                    }}, modifier = Modifier.fillMaxWidth())
-                if (showError) Text("Mật khẩu không đúng. Vui lòng thử lại.",
-                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                if (!biometricOnly) {
+                    OutlinedTextField(value = password, onValueChange = { password = it; showError = false },
+                        label = { Text("Mật khẩu") }, singleLine = true, isError = showError,
+                        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        trailingIcon = { IconButton(onClick = { showPassword = !showPassword }) {
+                            Icon(if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility, null)
+                        }}, modifier = Modifier.fillMaxWidth())
+                    if (showError) Text("Mật khẩu không đúng. Vui lòng thử lại.",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                }
                 // Biometric option
                 if (onBiometricAuth != null) {
-                    TextButton(onClick = { onBiometricAuth(); onDismiss() }, modifier = Modifier.fillMaxWidth()) {
+                    if (biometricOnly) {
+                        Text("Thư mục này được khóa bằng sinh trắc học.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(
+                        onClick = { onBiometricAuth(); if (!biometricOnly) onDismiss() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         Icon(Icons.Default.Fingerprint, null, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(8.dp))
                         Text("Dùng sinh trắc học")
@@ -1263,11 +1466,274 @@ private fun EnterPasswordDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                if (!onConfirm(password)) { showError = true; password = "" }
-            }) { Text(confirmLabel) }
+            if (!biometricOnly) {
+                TextButton(onClick = {
+                    if (!onConfirm(password)) { showError = true; password = "" }
+                }) { Text(confirmLabel) }
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Hủy") } }
+    )
+}
+
+// ── App Permission Manager Dialog ─────────────────────────────────────────────
+
+/** Lightweight model for an installed app shown in the permission manager. */
+private data class InstalledAppInfo(val packageName: String, val label: String)
+
+/**
+ * Builds content:// FileProvider URIs for every media file inside the locked
+ * folder's secure storage directory.
+ *
+ * The secure directory is:
+ *   Android/data/<package>/files/locked/<sanitisedFolderName>/
+ *
+ * Other apps can read these URIs only if they have been granted permission via
+ * [Context.grantUriPermission] – see [AppFolderPermissionRepository].
+ */
+private fun buildFileUrisForFolder(context: android.content.Context, folderName: String): List<Uri> {
+    val sanitized = folderName.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(64)
+    val secureDir = File(context.getExternalFilesDir("locked"), sanitized)
+    return secureDir.listFiles()
+        ?.filter { it.isFile }
+        ?.mapNotNull { file ->
+            try {
+                FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+            } catch (_: Exception) { null }
+        } ?: emptyList()
+}
+
+/**
+ * Sends all files in the locked folder to [packageName] via an Android Intent.
+ *
+ * Flow:
+ *  1. Build content:// URIs for every file via FileProvider (our app already
+ *     called grantUriPermission for this package, so the OS allows the access).
+ *  2. Fire [Intent.ACTION_SEND_MULTIPLE] targeted to [packageName].
+ *     • If the target app does not handle ACTION_SEND_MULTIPLE we fall back to
+ *       [Intent.ACTION_VIEW] on the first file.
+ *     • If the target app has no matching Activity at all we fall back to a
+ *       system chooser so the user can pick another viewer.
+ */
+private fun openFilesInApp(context: android.content.Context, packageName: String, uris: List<Uri>) {
+    if (uris.isEmpty()) {
+        Toast.makeText(context, "Không có file nào trong thư mục này", Toast.LENGTH_SHORT).show()
+        return
+    }
+
+    // Determine the most specific MIME type we can broadcast.
+    val mimeTypes = uris.mapNotNull { context.contentResolver.getType(it) }.toSet()
+    val mimeType = when {
+        mimeTypes.isEmpty()                            -> "*/*"
+        mimeTypes.size == 1                            -> mimeTypes.first()
+        mimeTypes.all { it.startsWith("image/") }  -> "image/*"
+        mimeTypes.all { it.startsWith("video/") }  -> "video/*"
+        else                                           -> "*/*"
+    }
+
+    fun launchFallbackChooser() {
+        // No package restriction – let the user pick any matching app.
+        val fallbackIntent = if (uris.size == 1) {
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uris[0], mimeType)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        } else {
+            Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = mimeType
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        }
+        context.startActivity(Intent.createChooser(fallbackIntent, "Mở bằng…"))
+    }
+
+    val baseIntent = if (uris.size == 1) {
+        Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uris[0], mimeType)
+            setPackage(packageName)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    } else {
+        Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = mimeType
+            setPackage(packageName)
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+
+    try {
+        context.startActivity(baseIntent)
+    } catch (_: Exception) {
+        // Target package doesn't handle this intent type → use system chooser.
+        launchFallbackChooser()
+    }
+}
+
+/**
+ * Dialog that lets the user:
+ *  1. Tick apps that are ALLOWED to access the locked folder.
+ *  2. Tap the ▶ button to open the folder's content in that app right now.
+ *
+ * Why the "Open" button is required:
+ *   Files are stored in app-private secure storage which MediaStore never
+ *   indexes.  Granting URI permission alone is not enough: the other app also
+ *   needs to RECEIVE the URIs.  Tapping ▶ fires an Intent that delivers
+ *   every file URI to the selected app so it can open them immediately.
+ */
+@Composable
+private fun AppPermissionManagerDialog(
+    folderName: String,
+    viewModel: GalleryViewModel,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    var installedApps   by remember { mutableStateOf<List<InstalledAppInfo>>(emptyList()) }
+    var grantedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var isLoading       by remember { mutableStateOf(true) }
+
+    LaunchedEffect(folderName) {
+        grantedPackages = viewModel.getGrantedAppsForFolder(folderName)
+        val apps = withContext(Dispatchers.IO) {
+            val pm = context.packageManager
+            val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(launcherIntent, 0)
+                .map { it.activityInfo.packageName }
+                .distinct()
+                .filter { it != context.packageName }
+                .map { pkg ->
+                    InstalledAppInfo(
+                        packageName = pkg,
+                        label = try {
+                            @Suppress("DEPRECATION")
+                            pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                        } catch (_: Exception) { pkg },
+                    )
+                }
+                .sortedBy { it.label.lowercase() }
+        }
+        installedApps = apps
+        isLoading = false
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon  = { Icon(Icons.Default.PhoneAndroid, contentDescription = null) },
+        title = { Text("Chia sẻ với ứng dụng") },
+        text  = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // ── How-to hint ────────────────────────────────────────────
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    ),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Icon(
+                            Icons.Default.Info, null,
+                            modifier = Modifier.size(16.dp).padding(top = 1.dp),
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "✔ Tích chọn ứng dụng để cấp quyền.\n" +
+                                    "▶ Nhấn nút Mở để gửi ảnh/video sang app ngay.\n" +
+                                    "📂 Sau khi cấp quyền, mở trình chọn tệp trong app khác → chọn \"MediaPreview\" để thấy thư mục này.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                }
+
+                if (isLoading) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(120.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { CircularProgressIndicator() }
+                } else if (installedApps.isEmpty()) {
+                    Text(
+                        "Không tìm thấy ứng dụng nào.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(8.dp),
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                        lazyItems(installedApps, key = { it.packageName }) { app ->
+                            val granted = app.packageName in grantedPackages
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (granted) {
+                                            viewModel.revokeAppFolderPermission(folderName, app.packageName)
+                                            grantedPackages = grantedPackages - app.packageName
+                                        } else {
+                                            viewModel.grantAppFolderPermission(folderName, app.packageName)
+                                            grantedPackages = grantedPackages + app.packageName
+                                        }
+                                    }
+                                    .padding(vertical = 4.dp, horizontal = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Checkbox(
+                                    checked = granted,
+                                    onCheckedChange = { checked ->
+                                        if (checked) {
+                                            viewModel.grantAppFolderPermission(folderName, app.packageName)
+                                            grantedPackages = grantedPackages + app.packageName
+                                        } else {
+                                            viewModel.revokeAppFolderPermission(folderName, app.packageName)
+                                            grantedPackages = grantedPackages - app.packageName
+                                        }
+                                    },
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text       = app.label,
+                                        style      = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = if (granted) FontWeight.SemiBold else FontWeight.Normal,
+                                    )
+                                    Text(
+                                        text     = app.packageName,
+                                        style    = MaterialTheme.typography.labelSmall,
+                                        color    = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                // ── "Open in app" button (only shown when granted) ──
+                                AnimatedVisibility(visible = granted) {
+                                    IconButton(
+                                        onClick = {
+                                            val uris = buildFileUrisForFolder(context, folderName)
+                                            openFilesInApp(context, app.packageName, uris)
+                                        },
+                                        modifier = Modifier.size(36.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector        = Icons.Default.OpenInNew,
+                                            contentDescription = "Mở trong ${app.label}",
+                                            tint               = MaterialTheme.colorScheme.primary,
+                                            modifier           = Modifier.size(20.dp),
+                                        )
+                                    }
+                                }
+                            }
+                            HorizontalDivider(thickness = 0.5.dp)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton  = {},
+        dismissButton  = { TextButton(onClick = onDismiss) { Text("Đóng") } },
     )
 }
 

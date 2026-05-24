@@ -8,6 +8,9 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
+    <!-- Needed to enumerate installed apps for the per-app folder-permission UI -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
 
     <application
         android:name=".MediaPreviewApplication"
@@ -41,6 +44,41 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/gallery_widget_info" />
         </receiver>
+
+        <!--
+            FileProvider: exposes files in Android/data/<pkg>/files/locked/ via
+            content:// URIs.  android:exported="false" + android:grantUriPermissions="true"
+            are required so our app can pass those URIs to third-party apps via
+            Context.grantUriPermission().  The OS still enforces that only packages
+            we explicitly grant can open the URIs.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.provider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_provider_paths" />
+        </provider>
+
+        <!--
+            DocumentsProvider: makes locked folders visible in every app's
+            file picker (SAF / Storage Access Framework) under "MediaPreview".
+            Only folders that have at least one app granted via
+            AppFolderPermissionRepository appear in the provider root.
+            Protected by MANAGE_DOCUMENTS so only the system can call it directly.
+        -->
+        <provider
+            android:name=".data.LockedMediaDocumentsProvider"
+            android:authorities="${applicationId}.locked_docs"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
     </application>
 
 </manifest>
